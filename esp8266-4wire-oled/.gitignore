@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 编译产物：build.py 会把 .py 编成 .mpy 放到这里，每次生成，不进仓库
+mpy/
+
+# 云端构建产物
+out/
+
+# 旧版本备份（完整版，和精简版无关）
+.bak-v2/
+
+# 崩溃转储（MSYS make 在 Windows 上留下的）
+*.stackdump
+
+# 本地虚拟环境 / 编辑器
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store

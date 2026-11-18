@@ -1,0 +1,102 @@
+# -*- coding: utf-8 -*-
+"""ESP8266 联网时钟 · 极限精简版（1MB flash 用）
+
+内存目标：常驻 <= 9KB，好让 esp8266-1m 固件（堆约 22KB）也跑得动。
+为了这个目标砍掉了：城市表、自动定位模块、网页设置页、扫描 WiFi 列表、
+HTTP 重定向、多表盘。留下的只有：时钟 + NTP + 天气 + 手填 WiFi + 长按重置。
+
+接线（4 针 I2C 屏 -> 模组，按 GPIO 编号）：
+  GND->GND   VCC->3V3
+  SCL->GPIO5   SDA->GPIO4
+7 针 SPI 屏的接线见文件末尾 SPI 段（IFACE 改成 "spi"）。
+"""
+# ---------------- WiFi ----------------
+# 留空 = 没有 wifi.txt 时开机直接进配网热点（推荐）。
+# 想在固件里预置 WiFi：把这两个填上；配网页保存过的凭据优先于这里。
+# 注意别留旧 SSID 占位——那会让每次开机先白等 30 秒超时才开热点。
+WIFI_SSID = ""
+WIFI_PASS = ""
+WIFI_FILE = "wifi.txt"          # 两行纯文本：第一行 SSID，第二行密码
+WIFI_TIMEOUT = 8                # 单次连接等待秒数
+WIFI_RETRY = 0                  # 0 = 只试一次。失败就直接开热点，
+                                # 别让「路由器没开」变成开机先站 20 秒才出配网页
+
+# ---------------- 配网热点 ----------------
+# AP_PASS 留空 = 开放热点（无密码，手机连上即用，推荐）。
+# ESP8266 的 softAP 密码在固件里读不回来（config("password") 直接报
+# unknown config param），所以「密码到底写没写进去」只能靠手机试；一旦
+# 握手对不上，表现就是「密码正确却连不上」，而且没有任何手段自查。
+# 配网热点的唯一作用是把一个网页递给手机，改成开放热点就没有这个坑了。
+# 要加密就填 8 位以上（WPA2 要求最短 8 位），热点会自动切回 WPA2。
+# 名字里带 Clock 而不是沿用 YD-ESP-SETUP：手机对连过的 SSID 会存一份
+# 「加密方式 + 密码」的档案，档案和热点实际情况不符时，手机会一直拿旧档案
+# 去握手，表现就是「密码明明对却连不上」。换个没连过的 SSID 直接绕过。
+AP_SSID = "YD-Clock-SETUP"
+AP_PASS = ""
+AP_IP = "192.168.4.1"
+SETUP_FLAG = "setup.flag"
+LONG_PRESS_MS = 3000
+
+# ---------------- 地点 ----------------
+# 联网后按出口 IP 自动定位（ip-api.com，纯文本三行），结果存 geo.txt。
+# 没网时用这里的兜底值。
+LAT = "30.7461"
+LON = "120.7555"
+GEO_FILE = "geo.txt"
+
+# ---------------- 显示 ----------------
+HOUR24 = 1                     # 0 = 12 小时制（会显示 AM/PM）
+SHOW_SEC = 1
+SHOW_WX = 1                    # 短按 FLASH 可临时切换
+ROTATE = 0                     # 1 = 翻转 180°
+
+# ---------------- 抗烧屏 ----------------
+OLED_CONTRAST = 0x3F
+BURNIN_SHIFT_SEC = 180
+NIGHT_ON = 1
+NIGHT_A = 23                   # 夜间变暗起点（小时）
+NIGHT_B = 7                    # 夜间变暗终点（小时）
+NIGHT_CONTRAST = 0x1F
+
+# ---------------- 网络 ----------------
+WEATHER_REFRESH = 600
+NTP_REFRESH = 6 * 3600
+HTTP_TIMEOUT = 4
+TZ_HOURS = 8
+NTP_HOSTS = ("ntp.aliyun.com", "pool.ntp.org")
+NTP_TIMEOUT = 2
+
+# ---------------- OLED（128x64） ----------------
+# IFACE 选总线：4 针屏用 "i2c"，7 针 SPI 屏用 "spi"。
+# 4 针 I2C 屏（1.3" JMD1.3D 等）只要 4 根线，还省下 D 系列引脚。
+IFACE = "i2c"
+PANEL = "ssd1306"              # "ssd1306" 或 "sh1106"：
+                               # 1.3" 屏芯片有这两种，卖家常混标。SSD1306 参数
+                               # 打在 SH1106 上会整体偏 2 像素或全黑，反之亦然。
+COL_OFFSET = 0                 # 画面整体右移几列。SH1106 显存 132 列，
+                               # 若 PANEL 选对了仍偏 2 像素，这里填 2。
+
+# --- I2C（IFACE = "i2c"）---
+SDA_PIN = 4                    # GPIO4
+SCL_PIN = 5                    # GPIO5
+I2C_FREQ = 400_000             # 花屏就从 400_000 降到 100_000
+I2C_ADDR = 0x3C                # 少数模块是 0x3D，驱动会自动再试一次
+
+# --- SPI（IFACE = "spi"，7 针屏）---
+# 带 662K LDO 的模块必须接 5V，裸 3.3V 屏接 3V3。
+# ESP8266 硬件 SPI 脚位固定：SCK=14  MOSI=13  CS=15（改不了）
+# GPIO15 是启动采样脚，必须上电为低；屏 CS 是高阻输入，靠模组内部下拉
+# 保证低电平。若出现上电不启动（串口 boot mode:(1,x)），把屏 CS 直接接 GND
+# 常选中即可——驱动里 cs(0)/cs(1) 翻的空脚，不影响显示。
+SCK_PIN = 14                   # D5
+MOSI_PIN = 13                  # D7
+RES_PIN = 4                    # D2
+DC_PIN = 5                     # D1
+CS_PIN = 15                    # D8
+SPI_ID = 1
+SPI_BAUDRATE = 8_000_000
+
+# ---------------- 其它 ----------------
+BOOT_PIN = 0                   # FLASH 键
+CPU_FREQ = 160_000_000
+DEBUG = 1                      # 1 = 把配网请求写进 dbg.txt（排查白屏用，正常用改回 0）

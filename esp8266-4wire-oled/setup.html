@@ -1,0 +1,20 @@
+<!DOCTYPE html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WiFi 设置</title>
+<style>body{margin:0;padding:24px 18px;background:#eef1f7;color:#19202e;font:16px/1.5 -apple-system,Arial,sans-serif}
+h2{font-size:19px;margin:0 0 6px;font-weight:500}p{color:#5b6472;font-size:13px;margin:0 0 20px}
+label{display:block;font-size:13px;color:#5b6472;margin:16px 0 6px}
+input{width:100%;box-sizing:border-box;padding:11px 12px;font-size:16px;border:1px solid #c9d0dd;border-radius:8px;background:#fff}
+button{width:100%;margin-top:22px;padding:13px;font-size:16px;border:0;border-radius:8px;background:#2563eb;color:#fff}
+.f{color:#8a93a3;font-size:12px;margin-top:22px}</style></head><body>
+<h2>WiFi 设置</h2>
+<p>输入 2.4G 网络的名称和密码，保存后设备自动重启联网。</p>
+<form method="POST" action="/save">
+<label>WiFi 名称（区分大小写）</label>
+<input name="ssid" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+<label>密码（开放网络留空）</label>
+<input name="pass" type="password" autocomplete="off">
+<button>保存并重启</button>
+</form>
+<p class="f">连不上时：长按板上 FLASH 键 3 秒，重启后连热点 YD-Clock-SETUP（无密码），打开 192.168.4.1。</p>
+</body></html>

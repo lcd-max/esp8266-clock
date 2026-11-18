@@ -1,0 +1,197 @@
+name: Build ESP8266 firmware
+
+# 在 GitHub 的免费 Linux runner 上编译带 frozen 模块的固件。
+#
+# 为什么在云端编：ESP8266 的 SDK 静态库（libhal.a / libpp.a / liblwip.a …）
+# 必须和编译器同批编出来。官方工具链 xtensa-lx106-elf-standalone 的 sysroot
+# 里就带着这套库（Makefile 里 ESP_SDK = $(CC) -print-sysroot/usr），所以
+# 只要用官方工具链，SDK 和 gcc 天然 ABI 一致。本机 Windows 上用的是
+# earlephilhower gcc10 + 外挂原厂 SDK 2.2.0，两者不同源，编出来的固件
+# 550KB 能过链接但上电不启动，就是这个原因。
+#
+# 这条流水线和 MicroPython 官方 CI（.github/workflows/ports_esp8266.yml）
+# 的做法完全一致，只是多传了 FROZEN_MANIFEST 和精简开关。
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      variant:
+        description: "Flash 容量（TYWE3L 是 1MB）"
+        type: choice
+        options: ["1m", "2m", "4m"]
+        default: "1m"
+      slim:
+        description: "精简：关掉 SSL / BTREE（省约 35KB flash）"
+        type: boolean
+        default: true
+
+env:
+  MP_VERSION: v1.29.0
+  TOOLCHAIN_URL: https://micropython.org/resources/xtensa-lx106-elf-standalone.tar.gz
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ---------------------------------------------------------------- 参数
+      - name: 解析构建参数
+        id: cfg
+        run: |
+          V="${{ inputs.variant }}"
+          if [ -z "$V" ]; then V=1m; fi
+          case "$V" in
+            1m) BV="BOARD_VARIANT=FLASH_1M" ;;
+            2m) BV="BOARD_VARIANT=FLASH_2M_ROMFS" ;;
+            *)  BV="" ;;
+          esac
+          echo "tag=$V" >> "$GITHUB_OUTPUT"
+          echo "bv=$BV" >> "$GITHUB_OUTPUT"
+          # workflow_dispatch 之外的触发方式没有 inputs，默认为精简
+          if [ "${{ inputs.slim }}" = "false" ]; then
+            echo "slim=" >> "$GITHUB_OUTPUT"
+          else
+            echo "slim=MICROPY_PY_SSL=0 MICROPY_SSL_AXTLS=0 MICROPY_PY_BTREE=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ------------------------------------------------------- 交叉编译工具链
+      - name: 缓存 xtensa 工具链
+        id: tc-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/xtensa-lx106
+          # 改工具链版本时记得改这个 key，否则会命中旧缓存
+          key: xtensa-lx106-standalone-v1
+
+      - name: 下载工具链
+        if: steps.tc-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p ~/xtensa-lx106
+          curl -fL --retry 5 --retry-delay 5 -o /tmp/tc.tar.gz "$TOOLCHAIN_URL"
+          tar xzf /tmp/tc.tar.gz -C ~/xtensa-lx106
+          # 工具链自带的 esptool.py 是 2016 年的老版本，删掉用 pip 装的
+          rm -f ~/xtensa-lx106/xtensa-lx106-elf/bin/esptool.py
+          ~/xtensa-lx106/xtensa-lx106-elf/bin/xtensa-lx106-elf-gcc --version | head -1
+
+      - name: 工具链加入 PATH
+        run: echo "$HOME/xtensa-lx106/xtensa-lx106-elf/bin" >> "$GITHUB_PATH"
+
+      # esptool 必须钉 3.3.1：Makefile 用 `esptool.py --chip esp8266 elf2image`
+      # 把 ELF 转成 firmware.bin，4.x 改成子命令式且默认输出名变了。
+      - name: 安装 esptool
+        run: |
+          # Ubuntu 24.04 起 pip 有 PEP 668 限制，22.04 没有；两种都兜住
+          sudo pip3 install --quiet pyserial "esptool==3.3.1" \
+            || sudo pip3 install --quiet --break-system-packages pyserial "esptool==3.3.1"
+          command -v esptool.py && esptool.py version
+
+      # ------------------------------------------------------ MicroPython 源码
+      - name: 拉取 MicroPython ${{ env.MP_VERSION }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 -b "$MP_VERSION" \
+            https://github.com/micropython/micropython.git "$RUNNER_TEMP/mp"
+          make -C "$RUNNER_TEMP/mp/mpy-cross" -j"$(nproc)"
+
+      - name: 拉取子模块（axtls / berkeley-db / micropython-lib）
+        working-directory: ${{ runner.temp }}/mp
+        run: |
+          set -euo pipefail
+          make -C ports/esp8266 submodules
+          # 坑：py/manifest.mk 生成 frozen_content.c 之前会无条件检查
+          # $(MPY_LIB_DIR)/README.md 是否存在，不存在直接 false 失败。
+          # 而 make 版的 submodules 目标里 GIT_SUBMODULES 只有 axtls 和
+          # berkeley-db（只有 cmake 版 mkrules.cmake 会自动补 micropython-lib），
+          # 所以必须手动拉一次，哪怕我们的清单里一个 require() 都没有。
+          git submodule update --init lib/micropython-lib
+          test -e lib/micropython-lib/README.md
+
+      # ---------------------------------------------------------------- 编译
+      - name: 编译固件（1MB / frozen）
+        working-directory: ${{ runner.temp }}/mp
+        run: |
+          set -euo pipefail
+          # FROZEN_MANIFEST 指向仓库里的清单；manifest 里的 freeze(".")
+          # 是相对清单所在目录解析的，所以 app.py/web.py/ssd1306.py
+          # 就在同一个目录里，不用额外复制。
+          make -C ports/esp8266 \
+            BOARD=ESP8266_GENERIC \
+            ${{ steps.cfg.outputs.bv }} \
+            FROZEN_MANIFEST="$GITHUB_WORKSPACE/frozen_manifest.py" \
+            ${{ steps.cfg.outputs.slim }} \
+            -j"$(nproc)"
+
+      # ---------------------------------------------------------------- 校验
+      # 编过了不等于冻上了：manifest 路径写错时 make 会静默用官方默认清单，
+      # 固件照样出得来，但我们的 app/web/ssd1306 没进去，等于白编。
+      - name: 校验冻结结果
+        working-directory: ${{ runner.temp }}/mp
+        run: |
+          set -euo pipefail
+          FZ=$(find ports/esp8266 -maxdepth 2 -name frozen_content.c | head -1)
+          echo "清单产物: $FZ"
+          MISSING=""
+          for m in app.py web.py ssd1306.py _boot.py inisetup.py; do
+            if grep -qE "frozen bytecode for file $m( |,|$)" "$FZ"; then
+              echo "  ok  $m"
+            else
+              echo "  MISSING  $m"
+              MISSING="$MISSING $m"
+            fi
+          done
+          echo "冻结模块总数: $(grep -c 'frozen bytecode for file' "$FZ")"
+          if [ -n "$MISSING" ]; then
+            echo "::error::这些模块没冻进去:$MISSING（检查 FROZEN_MANIFEST 路径）"
+            exit 1
+          fi
+          echo "- 冻结校验通过：app / web / ssd1306 / _boot / inisetup 全在固件里" >> "$GITHUB_STEP_SUMMARY"
+
+      # ---------------------------------------------------------------- 产物
+      - name: 收集固件
+        working-directory: ${{ runner.temp }}/mp
+        run: |
+          set -euo pipefail
+          BIN=$(find ports/esp8266 -maxdepth 2 -name firmware.bin | head -1)
+          test -n "$BIN"
+          SIZE=$(stat -c%s "$BIN")
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          OUT="$GITHUB_WORKSPACE/out/micropython-esp8266-${{ steps.cfg.outputs.tag }}-frozen.bin"
+          cp "$BIN" "$OUT"
+          echo "固件 $OUT"
+          echo "大小 $SIZE 字节（1MB 布局上限 585728 字节）"
+          if [ "$SIZE" -gt 585728 ]; then
+            echo "::error::固件超出 1MB 布局的 572K irom0 段，链接本应失败"
+            exit 1
+          fi
+          echo "剩余空间 $((585728 - SIZE)) 字节"
+          {
+            echo "### 固件编译完成"
+            echo ""
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 变体 | \`${{ steps.cfg.outputs.tag }}\` |"
+            echo "| 大小 | $SIZE 字节 / 585728 |"
+            echo "| MicroPython | $MP_VERSION |"
+            echo "| 精简 | \`${{ steps.cfg.outputs.slim }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-${{ steps.cfg.outputs.tag }}
+          path: out/*.bin
+          if-no-files-found: error
+
+      # 打 tag 时顺手发 release，方便直接用手机/浏览器下载烧录
+      - name: 发布到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/*.bin
+          generate_release_notes: true
