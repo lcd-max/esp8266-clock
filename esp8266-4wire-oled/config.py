@@ -34,6 +34,10 @@ WIFI_RETRY = 0                  # 0 = 只试一次。失败就直接开热点，
 AP_SSID = "YD-Clock-SETUP"
 AP_PASS = ""
 AP_IP = "192.168.4.1"
+# 停在配网模式时，每隔这么久试连一次已保存的 WiFi。
+# 路由器比板子开机慢、手机热点关了又开，没有这个就永远停在热点里，
+# 时钟冻在最后一次对时的时刻。设 0 = 不自动重连（只能断电重启）。
+AP_RETRY_SEC = 600
 SETUP_FLAG = "setup.flag"
 LONG_PRESS_MS = 3000
 
@@ -50,6 +54,18 @@ SHOW_SEC = 1
 SHOW_WX = 1                    # 短按 FLASH 可临时切换
 ROTATE = 0                     # 1 = 翻转 180°
 
+# ---------------- 跑马灯（水平轮播） ----------------
+# 顶栏（日期/星期/联网状态）和下面两行天气都靠这两个参数滚动：
+# 速度 = MARQUEE_PX * 1000 / MARQUEE_MS 像素/秒。默认 2px/110ms ≈ 18px/s，
+# 正好是 8 像素宽的点阵字「不快不慢」的阅读速度。
+# 想更顺滑就把 PX 改 1（帧率不变、速度减半），代价是 I2C 刷新次数不变、
+# 但每帧位移变小，肉眼更连续。
+MARQUEE_PX = 2
+MARQUEE_MS = 110
+# 屏幕整体刷新间隔。跑马灯要靠它推帧：100ms = 10fps。
+# 再快（<80ms）软件 I2C 会顶不住，一帧 1KB 要 20~30ms；再慢就开始一顿一顿。
+UI_MS = 100
+
 # ---------------- 抗烧屏 ----------------
 OLED_CONTRAST = 0x3F
 BURNIN_SHIFT_SEC = 180
@@ -60,7 +76,10 @@ NIGHT_CONTRAST = 0x1F
 
 # ---------------- 网络 ----------------
 WEATHER_REFRESH = 600
-NTP_REFRESH = 6 * 3600
+# 多久对一次时。ESP8266 的 RTC 靠 26MHz 晶振走，实测约 90ppm
+# （6 小时能慢 2 秒）。30 分钟一次把误差压到 0.2 秒以内；
+# NTP 一次只有两个 UDP 包，开销远小于天气请求，没必要省。
+NTP_REFRESH = 30 * 60
 HTTP_TIMEOUT = 4
 TZ_HOURS = 8
 NTP_HOSTS = ("ntp.aliyun.com", "pool.ntp.org")

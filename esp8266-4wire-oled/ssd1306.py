@@ -66,7 +66,7 @@ class SSD1306_SPI(framebuf.FrameBuffer):
         self.spi = spi
         self.dc = dc
         self.cs = cs
-        self.shift = (0, 0)
+        self.shift = 0
         self.buffer = bytearray(self.pages * width)
         super().__init__(self.buffer, width, height, framebuf.MONO_VLSB)
 
@@ -107,16 +107,17 @@ class SSD1306_SPI(framebuf.FrameBuffer):
         self._cmd(_SET_COM_OUT_DIR | ((r & 1) << 3))
         self._cmd(_SET_SEG_REMAP | (r & 1))
 
-    def set_shift(self, dx, dy):
-        """抗烧屏平移：dx 0~2 像素，dy 只支持 0 或 8（整页）。"""
-        self.shift = (dx & 3, 8 if dy else 0)
+    def set_shift(self, dx):
+        """抗烧屏的横向平移。纵向不在这里做 —— 早先按整页（8 像素）下移，
+        屏幕最下面一行会被推出可视区，看起来就是"字符偏下、末行显示不全"。
+        纵向改由 app.draw() 在绘制时偏移 1~2 像素，不影响任何一行。"""
+        self.shift = dx & 3
 
     def show(self):
-        dx, dy = self.shift
-        p0 = 1 if dy else 0
+        dx = self.shift
         w = self.width
-        for p in range(p0, self.pages):
-            src = (p - p0) * w
+        for p in range(self.pages):
+            src = p * w
             self._cmd(_SET_PAGE_ADDR)
             self._cmd(p)
             self._cmd(p)
@@ -126,15 +127,6 @@ class SSD1306_SPI(framebuf.FrameBuffer):
             self._data(self.buffer[src:src + w - dx])
             if dx:
                 self._data(b"\x00" * dx)
-        if p0:
-            # 顶部空出来的那一页要涂黑，否则留着上一帧的残影
-            self._cmd(_SET_PAGE_ADDR)
-            self._cmd(0)
-            self._cmd(0)
-            self._cmd(_SET_COL_ADDR)
-            self._cmd(0)
-            self._cmd(w - 1)
-            self._data(b"\x00" * w)
 
 
 class SSD1306_I2C(framebuf.FrameBuffer):
@@ -147,7 +139,7 @@ class SSD1306_I2C(framebuf.FrameBuffer):
         self.pages = height // 8
         self.i2c = i2c
         self.coloff = coloff
-        self.shift = (0, 0)
+        self.shift = 0
         self.buffer = bytearray(self.pages * width)
         super().__init__(self.buffer, width, height, framebuf.MONO_VLSB)
 
@@ -181,27 +173,21 @@ class SSD1306_I2C(framebuf.FrameBuffer):
         self._cmd(_SET_COM_OUT_DIR | ((r & 1) << 3))
         self._cmd(_SET_SEG_REMAP | (r & 1))
 
-    def set_shift(self, dx, dy):
-        self.shift = (dx & 3, 8 if dy else 0)
+    def set_shift(self, dx):
+        """同 SPI 版：只做横向平移，纵向交给绘制时的 y 偏移。"""
+        self.shift = dx & 3
 
     def show(self):
-        dx, dy = self.shift
-        p0 = 1 if dy else 0
+        dx = self.shift
         w = self.width
         col = self.coloff + dx
         lo = col & 0x0F
         hi = 0x10 | (col >> 4)
-        for p in range(p0, self.pages):
+        for p in range(self.pages):
             self._cmd(_PAGE | p)
             self._cmd(lo)
             self._cmd(hi)
-            src = (p - p0) * w
+            src = p * w
             self._data(self.buffer[src:src + w - dx])
             if dx:
                 self._data(b"\x00" * dx)
-        if p0:
-            # 顶部空出来的那一页要涂黑，否则留着上一帧的残影
-            self._cmd(_PAGE)
-            self._cmd(self.coloff & 0x0F)
-            self._cmd(0x10 | (self.coloff >> 4))
-            self._data(b"\x00" * w)

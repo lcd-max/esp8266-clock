@@ -159,13 +159,22 @@ raw REPL 实现，开串口前后显式把 DTR/RTS 拉高，**和这套接线可
 
 | 位置 | 含义 |
 |---|---|
-| 第一行 `MM-DD TH` | 本地日期、星期（时区由 `TZ_HOURS` 决定） |
-| 右上角 `LOC` | **loc**ation，按出口 IP 定位成功了，经纬度已存进 `geo.txt` |
-| 天气行左侧 | 温度（`18.5`），右侧是天气（`SUNNY`/`RAIN`/`CLOUDY`…） |
-| 最后一行 `RH72 F61` | 相对湿度、体感温度 |
+| 第一行滚动 `2026-11-19 THU   ONLINE` | 本地日期、星期（英文缩写）、**当前**联网状态（掉线立刻变 `OFFLINE`）；定位没拿到时末尾多一段 `NOLOC` |
+| 中间大字 `11:10:12` | 时:分:秒，**同一个字号**（3 倍），整串 116px 居中 |
+| 天气第一行滚动 `TEMP 18.5C   SUNNY` | 温度、天气（`SUNNY`/`RAIN`/`CLOUDY`…） |
+| 天气第二行滚动 `HUM 72%   FEEL 16.2C` | 相对湿度、体感温度 |
 | 第三行 `192.168.4.1` | 配网热点的网关地址；显示 `HTTP FAIL` 表示 80 端口没绑上 |
 
-`LOC` 只代表"定位拿到了"，位置是**出口 IP 的归属地**（运营商登记的城市/镇），
+三行都是**水平跑马灯**：文本首尾相接、匀速左移，屏幕只留 16 个字，所以长信息
+（完整日期、`FEEL` 体感）靠滚动看全。速度在 `config.py` 的 `MARQUEE_PX` /
+`MARQUEE_MS` 里调，默认 2px / 110ms ≈ 18 像素/秒。
+点阵字库是 8x8 的英文字库，中文放不进去，所以星期用 `MON`~`SUN` 缩写。
+
+`ONLINE` 看的是**当前链路**，不是"曾经连上过"：`w.isconnected()` 每秒查一次，
+路由断电、手机热点关掉，顶栏下一帧就翻成 `OFFLINE`，时钟继续按 RTC 走，
+后台每 10 秒重连一次，连回来自动变回 `ONLINE` 并补一次对时。
+
+`NOLOC` 只代表"定位没拿到"，位置是**出口 IP 的归属地**（运营商登记的城市/镇），
 不是 GPS，误差几十公里很正常。想看具体坐标，串口读 `geo.txt`，里面是 `纬度 经度`。
 缓存内容只要不是一个纬度 + 一个经度，开机就会自动删掉重新定位，不会带着坏数据跑。
 
@@ -184,7 +193,8 @@ raw REPL 实现，开串口前后显式把 DTR/RTS 拉高，**和这套接线可
 
 ## 改设置
 
-全在 `config.py`：`HOUR24`、`SHOW_SEC`、`SHOW_WX`、`ROTATE`、`OLED_CONTRAST`、
+全在 `config.py`：`HOUR24`、`SHOW_SEC`（0 = 只显示时:分，冒号闪烁）、`SHOW_WX`、`ROTATE`、`OLED_CONTRAST`、
+`MARQUEE_PX/MARQUEE_MS`（跑马灯速度）、`UI_MS`（刷新率）、
 `NIGHT_A/B`、`BURNIN_SHIFT_SEC`、`WIFI_SSID/WIFI_PASS`（出厂值）、`LAT/LON`（兜底坐标）。
 
 改完 `python build.py upload`。

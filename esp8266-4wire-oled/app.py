@@ -43,10 +43,14 @@ GL = (
 )
 
 st = {"wx": None, "g": 0, "nw": 0, "nn": 0, "sw": cfg.SHOW_WX, "c": -1, "f": 0,
-      "ok": 0, "wc": 0}
+      "ok": 0, "wc": 0, "on": 0,
+      "w1": "TEMP --C   WAIT", "w2": "HUM --%   FEEL --C"}
 P = None
 _o = None
 _lu = 0
+_oy = 0          # 抗烧屏的纵向偏移（0~2 像素），在 draw() 里加到每个 y 坐标上
+_tk = -1         # 顶栏文本的缓存键：分钟 + 联网/定位状态
+_ts = ""         # 顶栏跑马灯文本（缓存，别每帧重新拼字符串）
 
 
 def _nop(*a, **k):
@@ -90,42 +94,80 @@ def bw(s, sc=3, gp=2):
     return n
 
 
+def mq(s, y, off, gap=32):
+    """一行 8x8 文本的横向跑马灯（轮播）。
+
+    不另开显存、不切片：直接让 text() 画到负坐标上，framebuf 自己会裁掉
+    屏幕外的像素（新版固件的 text 有坐标边界检查）。所以只要画两份 —
+    左边一份正在往左移出，右边一份紧跟着接上，就形成无缝循环。
+
+    gap 是两遍之间的空白（默认 4 个字宽），太小会看起来首尾粘在一起。
+    """
+    n = len(s)
+    if not n:
+        return
+    tw = n * 8 + gap
+    x = -(off % tw)
+    _o.text(s, x, y, 1)
+    x += tw
+    if x < W:                          # 第二份还在屏内才画，省一半时间
+        _o.text(s, x, y, 1)
+
+
 def draw():
+    """一帧画面。
+
+    跑马灯要 8~10 fps，这个函数就被调得很频繁，所以能缓存的全缓存：
+    顶栏字符串按「分钟 + 状态」做键，一分钟才重拼一次，不拿堆去换流畅度。
+    """
+    global _tk, _ts
     tm = time.localtime(int(time.time()) + cfg.TZ_HOURS * 3600)
     hh = tm[3]
     sec = tm[5]
     o = _o
+    y = _oy                            # 抗烧屏偏移；最多 2，末行 52+7+2=61 仍在屏内
+    k = tm[3] * 100 + tm[4] + tm[2] * 10000 + st["on"] * 1000000 + st["g"] * 2000000
+    if k != _tk:                       # 跨分钟 / 断链重连 / 刚定位到才重拼
+        _tk = k
+        _ts = "%04d-%02d-%02d %s   %s%s" % (
+            tm[0], tm[1], tm[2], WK[tm[6]],
+            "ONLINE" if st["on"] else "OFFLINE",
+            "" if st["g"] else "   NOLOC")
     o.fill(0)
-    o.text("%02d-%02d %s" % (tm[1], tm[2], WK[tm[6]]), 2, 1, 1)
-    if st["g"]:
-        o.text("LOC", 114, 1, 1)
-    o.hline(0, 10, W, 1)
-    s = "%02d%s%02d" % (hh if cfg.HOUR24 else (hh % 12 or 12),
-                        ":" if sec % 2 == 0 else " ", tm[4])
-    if st["sw"]:
-        big(s, 27, 13, 3)
-        if not cfg.HOUR24:
-            o.text("AM" if hh < 12 else "PM", 108, 20, 1)
-        elif cfg.SHOW_SEC:
-            o.text("%02d" % sec, 112, 20, 1)
-        o.hline(0, 36, W, 1)
-        w = st["wx"] or {}
-        x = big(w.get("t", "--"), 2, 40, 2, 1)
-        o.text("C", min(x + 2, 114), 40, 1)
-        d = w.get("d", "--")
-        o.text(d, W - len(d) * 8 - 2, 40, 1)
-        o.text("RH%s F%s" % (w.get("h", "--"), w.get("f", "--")), 2, 54, 1)
+    # 跑马灯的位移由 ticks 推算，不在调用里自增 —— 网络阻塞会让 ui() 的
+    # 调用频率忽快忽慢，自增的话速度就跟着抖。
+    off = (time.ticks_ms() // cfg.MARQUEE_MS) * cfg.MARQUEE_PX
+    mq(_ts, 1 + y, off)                # 顶栏：2026-11-19 THU  ONLINE
+    o.hline(0, 10 + y, W, 1)
+    # 时间串：秒和时分**同一个字号**，整串一起放大。
+    # 3 倍下每个数字 5*3+2=17px，"HH:MM:SS" = 6*17 + 2*8 - 2 = 116px，
+    # 128 的屏左右各剩 6px，正好塞得下 —— 所以不需要再单开一个小字秒。
+    # 12 小时制还得给 AM/PM 留 16px，那就整体降到 2 倍（82+16 进去还有余量）。
+    hh = tm[3] if cfg.HOUR24 else (hh % 12 or 12)
+    if cfg.SHOW_SEC:
+        s = "%02d:%02d:%02d" % (hh, tm[4], sec)
     else:
-        big(s, (W - bw(s, 3)) // 2, 22, 3)
+        # 不显示秒时保留冒号闪烁：这时它是唯一的"在走"的提示
+        s = "%02d%s%02d" % (hh, ":" if sec % 2 == 0 else " ", tm[4])
+    sc = 2 if (cfg.SHOW_SEC and not cfg.HOUR24) else 3
+    dx = (W - bw(s, sc)) // 2
+    if st["sw"]:
+        big(s, dx, 13 + y + (3 - sc) * 3, sc)
         if not cfg.HOUR24:
-            o.text("AM" if hh < 12 else "PM", 108, 30, 1)
-        elif cfg.SHOW_SEC:
-            o.text("%02d" % sec, 112, 30, 1)
+            o.text("AM" if tm[3] < 12 else "PM", 108, 20 + y, 1)
+        o.hline(0, 36 + y, W, 1)
+        # 两行错开半个相位，避免同时换行、看起来像整块在跳
+        mq(st["w1"], 40 + y, off)      # 温度 + 天气
+        mq(st["w2"], 52 + y, off + 46)  # 湿度 + 体感
+    else:
+        big(s, dx, 22 + y + (3 - sc) * 3, sc)
+        if not cfg.HOUR24:
+            o.text("AM" if tm[3] < 12 else "PM", 108, 30 + y, 1)
     o.show()
 
 
 def ui():
-    """阻塞操作的空隙里补刷一次屏（最多 200ms 一次），秒不会卡住。
+    """阻塞操作的空隙里补刷一次屏（最多 cfg.UI_MS 一次），秒和跑马灯都不会卡住。
 
     没联网时不刷：这时 time.time() 还是 1970/2000 年，画出来是个假时钟，
     还会把「热点是哪个、IP 是多少」的提示盖掉 —— 屏幕上留着提示才有用。
@@ -134,7 +176,7 @@ def ui():
     if _o is None or not st["ok"]:
         return
     n = time.ticks_ms()
-    if _lu and time.ticks_diff(n, _lu) < 200:
+    if _lu and time.ticks_diff(n, _lu) < cfg.UI_MS:
         return
     _lu = n
     try:
@@ -396,12 +438,27 @@ def ntp():
             s.settimeout(cfg.NTP_TIMEOUT)
             p = bytearray(48)
             p[0] = 0x1B                # LI=0 VN=3 Mode=3(client)
+            t0 = time.ticks_ms()
             s.sendto(p, a)
             r = s.recv(48)
+            rtt = time.ticks_diff(time.ticks_ms(), t0)
             s.close()
             v = ((r[40] << 24) | (r[41] << 16) | (r[42] << 8) | r[43]) - 2208988800
             if v < 1600000000:
                 continue
+            # NTP 时间戳分"整秒"(40~43) 和"小数秒"(44~47) 两段。
+            # 只取整秒、直接写 RTC，等于每次对时把时钟往回拨最多 1 秒 ——
+            # 这才是"时间总是慢一两秒"的真正原因，跟晶振漂移无关。
+            # 但**别**把小数秒也塞进 RTC().datetime()：这块板子上实测会把
+            # 时间写飞（偏出 300 多秒）。正确做法是「四舍五入到最近的整秒」：
+            # 误差上限从 1 秒降到 0.5 秒，而写进 RTC 的仍是干净整数。
+            us = ((r[44] << 24) | (r[45] << 16) | (r[46] << 8) | r[47]) * 1000000 >> 32
+            us += rtt * 500             # ms → 微秒的单程延迟
+            if us >= 1000000:
+                us -= 1000000
+                v += 1
+            if us >= 500000:            # 进位：0.5 秒以上算下一秒
+                v += 1
             tm = time.localtime(v - EB)
             RTC().datetime((tm[0], tm[1], tm[2], tm[6], tm[3], tm[4], tm[5], 0))
             return 1
@@ -518,6 +575,11 @@ def wxf():
             raise OSError("format")
         st["wx"] = {"t": nm(p[0]), "h": nm(p[1]), "d": dsc(p[2]),
                     "f": nm(p[3]) if len(p) > 3 else "--"}
+        w = st["wx"]
+        # 跑马灯是 8 像素宽的等宽字，一行只放得下 16 个字，所以拆两行滚：
+        # 拼一次存下来，draw() 每帧直接拿去滚，别在 10fps 的路径上做格式化。
+        st["w1"] = "TEMP %sC   %s" % (w["t"], w["d"])
+        st["w2"] = "HUM %s%%   FEEL %sC" % (w["h"], w["f"])
         st["nw"] = t + cfg.WEATHER_REFRESH
         st["f"] = 0
         return
@@ -529,7 +591,7 @@ def wxf():
 
 # ------------------------------------------------------------------ 主流程
 def main():
-    global P, _o
+    global P, _o, _oy
     try:
         machine.freq(cfg.CPU_FREQ)
     except Exception:
@@ -561,6 +623,7 @@ def main():
         w = wcon(ssid, pw)
         if w.isconnected():
             st["ok"] = 1
+            st["on"] = 1
             geo_load()
         else:
             # 连不上时把原因码留下来，直接显示在屏上：
@@ -574,6 +637,14 @@ def main():
     ap_only = 0 if st["ok"] else 1
 
     if st["ok"]:
+        # 连上了就把热点关掉。ESP8266 的 SDK 会把 opmode 和 AP 配置写进 flash
+        # 的 wifi 区，上次配网开过热点，这次上电会自动恢复成 STA+AP 并存 ——
+        # 实测 AP 的 DHCP DNS 会跟着 STA 走（变成路由器的地址），手机连上后
+        # 解析不了任何域名，「热点在、网页打不开」。不连网时它没用，还抢信道。
+        try:
+            network.WLAN(network.AP_IF).active(False)
+        except Exception:
+            pass
         ok = P.start()
         msg("WIFI OK", w.ifconfig()[0], "" if ok else "HTTP FAIL")
         sync()
@@ -590,11 +661,13 @@ def main():
         msg("WIFI SETUP" if not ssid else "WIFI FAIL st%d" % st["wc"],
             "AP " + cfg.AP_SSID, cfg.AP_IP if ok else "HTTP FAIL")
 
-    lt = lth = lsh = time.ticks_ms()
+    lt = lth = lsh = la = time.ticks_ms()
     si = 0
     pr = 0
     wf = 0
-    SH = ((0, 0), (1, 0), (2, 0), (0, 8))
+    rty = 0                            # 配网模式下这次试连的起始时刻，0 = 没在试
+    # (横向 dx, 纵向 oy)：两边都只用 0~2 像素，四态轮换打散像素老化
+    SH = ((0, 0), (2, 0), (1, 1), (0, 2))
 
     while 1:
         n = time.ticks_ms()
@@ -611,12 +684,42 @@ def main():
             pr = 0
 
         # 每秒：网络维护（断网不阻塞，只是发起重连）
-        if time.ticks_diff(n, lt) >= 1000 and not ap_only:
+        if time.ticks_diff(n, lt) >= 1000:
             lt = n
+            if ap_only:
+                # 落在配网模式也要定期试连。原来 ap_only 一旦为真就彻底不再
+                # 碰 STA：路由器开机比板子慢、手机热点关了又开，板子就会永远
+                # 停在热点里，时钟冻在最后一次对时的时刻 —— 看起来像"越走越慢"。
+                # 间隔放大到 AP_RETRY_SEC：STA 与 AP 共存时 AP 的 DHCP DNS 会
+                # 被 STA 覆盖，配网页会解析不了域名，所以这个窗口要尽量少。
+                if rty:
+                    if time.ticks_diff(n, rty) > 20000:   # 试 20 秒没成，撤回
+                        rty = 0
+                        try:
+                            w.active(False)
+                        except Exception:
+                            pass
+                elif time.ticks_diff(n, la) >= cfg.AP_RETRY_SEC * 1000:
+                    la = n
+                    cs = creds()
+                    if cs[0]:
+                        try:
+                            w.active(True)
+                            w.connect(cs[0], cs[1])
+                            rty = n
+                        except Exception:
+                            rty = 0
             if w.isconnected():
+                st["on"] = 1
                 if not st["ok"]:
                     # 配网后自动重连成功：从热点提示切回时钟
                     st["ok"] = 1
+                    ap_only = 0
+                    rty = 0
+                    try:               # 热点是这次开机开的，连上 STA 就关掉
+                        network.WLAN(network.AP_IF).active(False)
+                    except Exception:
+                        pass
                     geo_load()
                     st["nn"] = 0
                     st["nw"] = 0
@@ -628,7 +731,8 @@ def main():
                     if not st["g"]:
                         geo()
                     wxf()
-            else:
+            elif not ap_only:
+                st["on"] = 0               # 掉线了：顶栏翻成 OFFLINE，不用等到重启
                 wf += 1
                 if wf % 10 == 1:
                     cs = creds()
@@ -650,12 +754,15 @@ def main():
         if not ap_only:
             ui()
 
-        # 抗烧屏：定时整屏平移 1~2 像素
+        # 抗烧屏：定时整屏平移。横向由驱动发数据时补零实现（不占内存），
+        # 纵向改绘制坐标偏移；原来按整页下移 8 像素会把最下面一行顶出屏幕。
         if cfg.BURNIN_SHIFT_SEC and time.ticks_diff(n, lsh) >= cfg.BURNIN_SHIFT_SEC * 1000:
             lsh = n
             si = (si + 1) % 4
             try:
-                o.set_shift(SH[si][0], SH[si][1])
+                o.set_shift(SH[si][0])
+                _oy = SH[si][1]
+                draw()                 # 立刻按新偏移重画，避免残影留到下一帧
             except Exception:
                 pass
 
